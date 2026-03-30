@@ -1,9 +1,10 @@
 const express = require('express');
-const { execSync, exec } = require('child_process');
+const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const https = require('https');
+const http = require('http');
 const crypto = require('crypto');
 
 const app = express();
@@ -11,24 +12,36 @@ app.use(express.json({ limit: '10mb' }));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+function downloadFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const proto = url.startsWith('https') ? https : http;
+    const file = fs.createWriteStream(dest);
+    proto.get(url, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        file.close();
+        fs.unlinkSync(dest);
+        return downloadFile(res.headers.location, dest).then(resolve).catch(reject);
+      }
+      res.pipe(file);
+      file.on('finish', () => file.close(resolve));
+    }).on('error', (err) => { try { fs.unlinkSync(dest); } catch(e) {} reject(err); });
+  });
+}
+
 function uploadToCloudinary(filePath, cloudName, apiKey, apiSecret) {
   return new Promise((resolve, reject) => {
     const timestamp = Math.floor(Date.now() / 1000);
-    const signature = crypto
-      .createHash('sha1')
-      .update(`timestamp=${timestamp}${apiSecret}`)
-      .digest('hex');
+    const signature = crypto.createHash('sha1')
+      .update(`timestamp=${timestamp}${apiSecret}`).digest('hex');
 
     const fileBuffer = fs.readFileSync(filePath);
     const boundary = '----FB' + crypto.randomBytes(16).toString('hex');
-
     const headerParts = [
       `--${boundary}\r\nContent-Disposition: form-data; name="api_key"\r\n\r\n${apiKey}\r\n`,
       `--${boundary}\r\nContent-Disposition: form-data; name="timestamp"\r\n\r\n${timestamp}\r\n`,
       `--${boundary}\r\nContent-Disposition: form-data; name="signature"\r\n\r\n${signature}\r\n`,
       `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="video.mp4"\r\nContent-Type: video/mp4\r\n\r\n`,
     ];
-
     const header = Buffer.from(headerParts.join(''));
     const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
     const body = Buffer.concat([header, fileBuffer, footer]);
@@ -37,26 +50,20 @@ function uploadToCloudinary(filePath, cloudName, apiKey, apiSecret) {
       hostname: 'api.cloudinary.com',
       path: `/v1_1/${cloudName}/video/upload`,
       method: 'POST',
-      headers: {
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        'Content-Length': body.length,
-      },
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length },
     };
 
-    const req = https.request(options, (response) => {
+    const req = https.request(options, (res) => {
       let data = '';
-      response.on('data', chunk => data += chunk);
-      response.on('end', () => {
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
         try {
           const parsed = JSON.parse(data);
           if (parsed.secure_url) resolve(parsed.secure_url);
           else reject(new Error(JSON.stringify(parsed)));
-        } catch (e) {
-          reject(new Error(data));
-        }
+        } catch (e) { reject(new Error(data)); }
       });
     });
-
     req.on('error', reject);
     req.write(body);
     req.end();
@@ -77,44 +84,50 @@ app.post('/generate', async (req, res) => {
   const outputPath = path.join(tmpDir, 'output.mp4');
 
   try {
-    // Download images
+    // Download and resize images
     const imgPaths = [];
     for (let i = 0; i < slides.length; i++) {
+      const rawPath = path.join(tmpDir, `raw${i}.jpg`);
       const imgPath = path.join(tmpDir, `slide${i}.jpg`);
-      await new Promise((resolve, reject) => {
-        const proto = slides[i].startsWith('https') ? https : require('http');
-        const file = fs.createWriteStream(imgPath);
-        proto.get(slides[i], (response) => {
-          if (response.statusCode === 301 || response.statusCode === 302) {
-            file.close();
-            const redir = slides[i].startsWith('https') ? https : require('http');
-            redir.get(response.headers.location, (r2) => {
-              r2.pipe(file);
-              file.on('finish', () => file.close(resolve));
-            }).on('error', reject);
-            return;
-          }
-          response.pipe(file);
-          file.on('finish', () => file.close(resolve));
-        }).on('error', reject);
-      });
+      await downloadFile(slides[i], rawPath);
+      // Resize to exact 1080x1920
+      execSync(`ffmpeg -i "${rawPath}" -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:white" "${imgPath}"`, { stdio: 'pipe' });
       imgPaths.push(imgPath);
     }
 
-    // Build concat input file
-    const concatFile = path.join(tmpDir, 'concat.txt');
-    const lines = imgPaths.map(p => `file '${p}'\nduration ${duration}`).join('\n');
-    fs.writeFileSync(concatFile, lines + `\nfile '${imgPaths[imgPaths.length - 1]}'`);
+    const n = imgPaths.length;
+    const fadeDuration = 0.8;
+    const fps = 30;
 
-    // Generate video with audio
+    // Build ffmpeg filter for crossfade transitions
+    let filterInputs = imgPaths.map((p, i) => `-loop 1 -t ${duration} -i "${p}"`).join(' ');
+    
+    // Build xfade filter chain
+    let filterComplex = '';
+    let lastOutput = '[0:v]';
+    
+    for (let i = 0; i < n - 1; i++) {
+      const nextInput = `[${i + 1}:v]`;
+      const outputLabel = i === n - 2 ? '[out]' : `[v${i}]`;
+      const offset = (i + 1) * duration - fadeDuration;
+      filterComplex += `${lastOutput}${nextInput}xfade=transition=fade:duration=${fadeDuration}:offset=${offset}${outputLabel};`;
+      lastOutput = `[v${i}]`;
+    }
+
+    if (n === 1) {
+      filterComplex = '[0:v]copy[out]';
+    }
+
+    // Generate video with crossfade + silent audio
     execSync(
-      `ffmpeg -f concat -safe 0 -i "${concatFile}" ` +
+      `ffmpeg ${filterInputs} ` +
       `-f lavfi -i anullsrc=r=44100:cl=stereo ` +
-      `-c:v libx264 -preset ultrafast -crf 28 ` +
+      `-filter_complex "${filterComplex}" ` +
+      `-map "[out]" -map ${n}:a ` +
+      `-c:v libx264 -preset ultrafast -crf 26 ` +
       `-c:a aac -shortest ` +
       `-pix_fmt yuv420p -movflags +faststart ` +
-      `-vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2" ` +
-      `-threads 2 "${outputPath}"`,
+      `-r ${fps} "${outputPath}"`,
       { stdio: 'pipe', timeout: 120000 }
     );
 
