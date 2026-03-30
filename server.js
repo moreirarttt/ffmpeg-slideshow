@@ -1,6 +1,5 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
-const { execSync } = require('child_process');
+const { execSync, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -21,16 +20,16 @@ function uploadToCloudinary(filePath, cloudName, apiKey, apiSecret) {
       .digest('hex');
 
     const fileBuffer = fs.readFileSync(filePath);
-    const boundary = '----FormBoundary' + Math.random().toString(36).substr(2);
+    const boundary = '----FB' + crypto.randomBytes(16).toString('hex');
 
-    const parts = [
-      `--${boundary}\r\nContent-Disposition: form-data; name="api_key"\r\n\r\n${apiKey}`,
-      `--${boundary}\r\nContent-Disposition: form-data; name="timestamp"\r\n\r\n${timestamp}`,
-      `--${boundary}\r\nContent-Disposition: form-data; name="signature"\r\n\r\n${signature}`,
+    const headerParts = [
+      `--${boundary}\r\nContent-Disposition: form-data; name="api_key"\r\n\r\n${apiKey}\r\n`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="timestamp"\r\n\r\n${timestamp}\r\n`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="signature"\r\n\r\n${signature}\r\n`,
       `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="video.mp4"\r\nContent-Type: video/mp4\r\n\r\n`,
     ];
 
-    const header = Buffer.from(parts.join('\r\n') + '\r\n');
+    const header = Buffer.from(headerParts.join(''));
     const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
     const body = Buffer.concat([header, fileBuffer, footer]);
 
@@ -44,10 +43,10 @@ function uploadToCloudinary(filePath, cloudName, apiKey, apiSecret) {
       },
     };
 
-    const req = https.request(options, (res) => {
+    const req = https.request(options, (response) => {
       let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
+      response.on('data', chunk => data += chunk);
+      response.on('end', () => {
         try {
           const parsed = JSON.parse(data);
           if (parsed.secure_url) resolve(parsed.secure_url);
@@ -65,57 +64,58 @@ function uploadToCloudinary(filePath, cloudName, apiKey, apiSecret) {
 }
 
 app.post('/generate', async (req, res) => {
-  const { html, duration = 8 } = req.body;
+  const { slides, duration = 4 } = req.body;
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME || 'dvimfzimi';
   const apiKey = process.env.CLOUDINARY_API_KEY;
   const apiSecret = process.env.CLOUDINARY_API_SECRET;
 
-  if (!html) return res.status(400).json({ error: 'No HTML provided' });
+  if (!slides || !Array.isArray(slides) || slides.length === 0) {
+    return res.status(400).json({ error: 'No slides provided. Send { slides: ["url1","url2",...] }' });
+  }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-'));
-  const framesDir = path.join(tmpDir, 'frames');
-  fs.mkdirSync(framesDir);
-  const rawPath = path.join(tmpDir, 'raw.mp4');
   const outputPath = path.join(tmpDir, 'output.mp4');
 
-  let browser;
   try {
-    browser = await puppeteer.launch({
-      headless: 'new',
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    });
-
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1080, height: 1920, deviceScaleFactor: 1 });
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-
-    const fps = 24;
-    const totalFrames = duration * fps;
-
-    for (let i = 0; i < totalFrames; i++) {
-      const framePath = path.join(framesDir, `frame${String(i).padStart(5, '0')}.png`);
-      await page.screenshot({ path: framePath, type: 'png' });
-      await new Promise(r => setTimeout(r, 1000 / fps));
+    // Download images
+    const imgPaths = [];
+    for (let i = 0; i < slides.length; i++) {
+      const imgPath = path.join(tmpDir, `slide${i}.jpg`);
+      await new Promise((resolve, reject) => {
+        const proto = slides[i].startsWith('https') ? https : require('http');
+        const file = fs.createWriteStream(imgPath);
+        proto.get(slides[i], (response) => {
+          if (response.statusCode === 301 || response.statusCode === 302) {
+            file.close();
+            const redir = slides[i].startsWith('https') ? https : require('http');
+            redir.get(response.headers.location, (r2) => {
+              r2.pipe(file);
+              file.on('finish', () => file.close(resolve));
+            }).on('error', reject);
+            return;
+          }
+          response.pipe(file);
+          file.on('finish', () => file.close(resolve));
+        }).on('error', reject);
+      });
+      imgPaths.push(imgPath);
     }
 
-    await browser.close();
-    browser = null;
+    // Build concat input file
+    const concatFile = path.join(tmpDir, 'concat.txt');
+    const lines = imgPaths.map(p => `file '${p}'\nduration ${duration}`).join('\n');
+    fs.writeFileSync(concatFile, lines + `\nfile '${imgPaths[imgPaths.length - 1]}'`);
 
-    // Generate video from frames
+    // Generate video with audio
     execSync(
-      `ffmpeg -framerate ${fps} -i ${framesDir}/frame%05d.png ` +
+      `ffmpeg -f concat -safe 0 -i "${concatFile}" ` +
+      `-f lavfi -i anullsrc=r=44100:cl=stereo ` +
       `-c:v libx264 -preset ultrafast -crf 28 ` +
+      `-c:a aac -shortest ` +
       `-pix_fmt yuv420p -movflags +faststart ` +
-      `-threads 1 ${rawPath}`,
-      { stdio: 'pipe', timeout: 180000 }
-    );
-
-    // Add silent audio track (required by Instagram)
-    execSync(
-      `ffmpeg -i ${rawPath} -f lavfi -i anullsrc=r=44100:cl=stereo ` +
-      `-c:v copy -c:a aac -shortest -movflags +faststart ${outputPath}`,
-      { stdio: 'pipe', timeout: 60000 }
+      `-vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2" ` +
+      `-threads 2 "${outputPath}"`,
+      { stdio: 'pipe', timeout: 120000 }
     );
 
     if (apiKey && apiSecret) {
@@ -131,7 +131,6 @@ app.post('/generate', async (req, res) => {
     console.error('Error:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
-    if (browser) { try { await browser.close(); } catch(e) {} }
     try { execSync(`rm -rf ${tmpDir}`); } catch(e) {}
   }
 });
