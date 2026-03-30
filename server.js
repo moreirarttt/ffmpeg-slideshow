@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const https = require('https');
-const http = require('http');
+const crypto = require('crypto');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -14,24 +14,53 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 function uploadToCloudinary(filePath, cloudName, apiKey, apiSecret) {
   return new Promise((resolve, reject) => {
-    const { execSync } = require('child_process');
     const timestamp = Math.floor(Date.now() / 1000);
-    const signature = require('crypto')
+    const signature = crypto
       .createHash('sha1')
       .update(`timestamp=${timestamp}${apiSecret}`)
       .digest('hex');
 
-    const result = execSync(
-      `curl -s -X POST https://api.cloudinary.com/v1_1/${cloudName}/video/upload ` +
-      `-F "file=@${filePath}" ` +
-      `-F "api_key=${apiKey}" ` +
-      `-F "timestamp=${timestamp}" ` +
-      `-F "signature=${signature}"`,
-      { timeout: 120000 }
-    );
-    const data = JSON.parse(result.toString());
-    if (data.secure_url) resolve(data.secure_url);
-    else reject(new Error(JSON.stringify(data)));
+    const fileBuffer = fs.readFileSync(filePath);
+    const boundary = '----FormBoundary' + Math.random().toString(36).substr(2);
+
+    const parts = [
+      `--${boundary}\r\nContent-Disposition: form-data; name="api_key"\r\n\r\n${apiKey}`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="timestamp"\r\n\r\n${timestamp}`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="signature"\r\n\r\n${signature}`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="video.mp4"\r\nContent-Type: video/mp4\r\n\r\n`,
+    ];
+
+    const header = Buffer.from(parts.join('\r\n') + '\r\n');
+    const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const body = Buffer.concat([header, fileBuffer, footer]);
+
+    const options = {
+      hostname: 'api.cloudinary.com',
+      path: `/v1_1/${cloudName}/video/upload`,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.secure_url) resolve(parsed.secure_url);
+          else reject(new Error(JSON.stringify(parsed)));
+        } catch (e) {
+          reject(new Error(data));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(body);
+    req.end();
   });
 }
 
