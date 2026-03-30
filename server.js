@@ -75,6 +75,7 @@ app.post('/generate', async (req, res) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-'));
   const framesDir = path.join(tmpDir, 'frames');
   fs.mkdirSync(framesDir);
+  const rawPath = path.join(tmpDir, 'raw.mp4');
   const outputPath = path.join(tmpDir, 'output.mp4');
 
   let browser;
@@ -101,12 +102,20 @@ app.post('/generate', async (req, res) => {
     await browser.close();
     browser = null;
 
+    // Generate video from frames
     execSync(
       `ffmpeg -framerate ${fps} -i ${framesDir}/frame%05d.png ` +
       `-c:v libx264 -preset ultrafast -crf 28 ` +
       `-pix_fmt yuv420p -movflags +faststart ` +
-      `-threads 1 ${outputPath}`,
+      `-threads 1 ${rawPath}`,
       { stdio: 'pipe', timeout: 180000 }
+    );
+
+    // Add silent audio track (required by Instagram)
+    execSync(
+      `ffmpeg -i ${rawPath} -f lavfi -i anullsrc=r=44100:cl=stereo ` +
+      `-c:v copy -c:a aac -shortest -movflags +faststart ${outputPath}`,
+      { stdio: 'pipe', timeout: 60000 }
     );
 
     if (apiKey && apiSecret) {
