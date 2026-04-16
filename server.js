@@ -68,7 +68,15 @@ app.post('/html-to-image', async (req, res) => {
 
     const page = await browser.newPage();
     await page.setViewport({ width, height });
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    
+    // Increased timeout and less strict waitUntil
+    await page.setContent(html, { 
+      waitUntil: 'domcontentloaded',
+      timeout: 60000 
+    });
+    
+    // Wait a bit for fonts to load
+    await page.waitForTimeout(2000);
 
     console.log('Taking screenshot...');
     const screenshot = await page.screenshot({ type: 'png', fullPage: false });
