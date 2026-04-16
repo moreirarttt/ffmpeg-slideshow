@@ -2,9 +2,9 @@
   "name": "ffmpeg-slideshow",
   "version": "1.0.0",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
   "dependencies": {
     "express": "^4.18.2",
-    "puppeteer": "^21.0.0"
+    "puppeteer": "^21.0.0",
+    "cloudinary": "^1.41.0"
   }
 }
