@@ -17,6 +17,19 @@ cloudinary.config({
 });
 
 // ─────────────────────────────────────────────
+// HELPER: Pick a random music file from music/
+// ─────────────────────────────────────────────
+function getRandomMusic() {
+  const musicDir = path.join(__dirname, 'music');
+  if (!fs.existsSync(musicDir)) return null;
+  const files = fs.readdirSync(musicDir).filter(f => f.endsWith('.mp3'));
+  if (!files.length) return null;
+  const randomFile = files[Math.floor(Math.random() * files.length)];
+  console.log(`Selected music: ${randomFile}`);
+  return path.join(musicDir, randomFile);
+}
+
+// ─────────────────────────────────────────────
 // EXISTING: HTML → Image (for carousel slides)
 // ─────────────────────────────────────────────
 app.post('/html-to-image', async (req, res) => {
@@ -51,27 +64,75 @@ app.post('/html-to-image', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
+// SLIDESHOW: Image URL → MP4 with random music
+// ─────────────────────────────────────────────
+app.post('/slideshow', async (req, res) => {
+  const { slides, duration = 15, audioUrl } = req.body;
+
+  if (!slides || !slides.length) {
+    return res.status(400).json({ error: 'slides array is required' });
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slideshow-'));
+  const outputPath = path.join(tmpDir, 'output.mp4');
+
+  try {
+    // Download the image
+    const imageUrl = slides[0];
+    const imagePath = path.join(tmpDir, 'slide.png');
+    execSync(`curl -L -o "${imagePath}" "${imageUrl}"`, { timeout: 30000 });
+
+    // Pick music: use provided audioUrl or pick random from music/ folder
+    let musicPath = null;
+    if (audioUrl) {
+      musicPath = path.join(tmpDir, 'audio.mp3');
+      execSync(`curl -L -o "${musicPath}" "${audioUrl}"`, { timeout: 30000 });
+    } else {
+      musicPath = getRandomMusic();
+    }
+
+    // Build FFmpeg command
+    let ffmpegCmd;
+    if (musicPath) {
+      ffmpegCmd = `ffmpeg -loop 1 -i "${imagePath}" -i "${musicPath}" -c:v libx264 -t ${duration} -pix_fmt yuv420p -vf "scale=1080:1350" -c:a aac -b:a 128k -shortest -movflags +faststart -y "${outputPath}"`;
+    } else {
+      ffmpegCmd = `ffmpeg -loop 1 -i "${imagePath}" -c:v libx264 -t ${duration} -pix_fmt yuv420p -vf "scale=1080:1350" -movflags +faststart -y "${outputPath}"`;
+    }
+
+    execSync(ffmpegCmd, { timeout: 120000 });
+
+    // Upload to Cloudinary
+    const result = await cloudinary.uploader.upload(outputPath, {
+      resource_type: 'video',
+      folder: 'appreciart-reels',
+    });
+
+    res.json({ url: result.secure_url, public_id: result.public_id });
+
+  } catch (err) {
+    console.error('Slideshow error:', err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
+  }
+});
+
+// ─────────────────────────────────────────────
 // NEW: HTML → Animated Video (for Reels)
-// Records 3s of animation frames → FFmpeg → .mp4
+// Records frames → FFmpeg → .mp4
 // ─────────────────────────────────────────────
 app.post('/html-to-video', async (req, res) => {
   let browser;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-'));
   const outputPath = path.join(tmpDir, 'reel.mp4');
-  
-  // Randomly select one of 3 music files
-  const musicFiles = ['music1.mp3', 'music2.mp3', 'music3.mp3'];
-  const randomMusic = musicFiles[Math.floor(Math.random() * musicFiles.length)];
-  const musicPath = path.join(__dirname, 'music', randomMusic);
-  
-  console.log(`Selected music: ${randomMusic}`);
+  const musicPath = getRandomMusic();
 
   try {
     const {
       html,
       width = 1080,
       height = 1350,
-      duration = 6,    // seconds
+      duration = 6,
       fps = 30,
       music = true
     } = req.body;
@@ -92,14 +153,10 @@ app.post('/html-to-video', async (req, res) => {
     const page = await browser.newPage();
     await page.setViewport({ width, height, deviceScaleFactor: 1 });
 
-    // Inject animation CSS into the HTML
     const animatedHtml = injectAnimations(html);
     await page.setContent(animatedHtml, { waitUntil: 'networkidle0', timeout: 60000 });
-
-    // Wait for fonts and images to load
     await new Promise(r => setTimeout(r, 1000));
 
-    // Capture frames
     const totalFrames = duration * fps;
     console.log(`Capturing ${totalFrames} frames at ${fps}fps...`);
 
@@ -107,7 +164,6 @@ app.post('/html-to-video', async (req, res) => {
       const framePath = path.join(tmpDir, `frame-${String(i).padStart(5, '0')}.png`);
       await page.screenshot({ path: framePath, type: 'png' });
 
-      // Advance animation time
       await page.evaluate((frameTime) => {
         document.querySelectorAll('*').forEach(el => {
           const style = window.getComputedStyle(el);
@@ -119,28 +175,21 @@ app.post('/html-to-video', async (req, res) => {
     }
 
     console.log('Assembling video with FFmpeg...');
-
-    // Build FFmpeg command
     const framesPattern = path.join(tmpDir, 'frame-%05d.png');
     let ffmpegCmd;
 
-    const hasMusicFile = music && fs.existsSync(musicPath);
+    const hasMusicFile = music && musicPath && fs.existsSync(musicPath);
 
     if (hasMusicFile) {
       ffmpegCmd = `ffmpeg -y -framerate ${fps} -i "${framesPattern}" -i "${musicPath}" -c:v libx264 -pix_fmt yuv420p -preset fast -crf 22 -c:a aac -b:a 128k -shortest -movflags +faststart "${outputPath}"`;
     } else {
-      // Generate a subtle ambient tone with FFmpeg if no music file
       ffmpegCmd = `ffmpeg -y -framerate ${fps} -i "${framesPattern}" -f lavfi -i "anullsrc=r=44100:cl=stereo" -c:v libx264 -pix_fmt yuv420p -preset fast -crf 22 -c:a aac -b:a 128k -t ${duration} -movflags +faststart "${outputPath}"`;
     }
 
     await new Promise((resolve, reject) => {
       exec(ffmpegCmd, (err, stdout, stderr) => {
-        if (err) {
-          console.error('FFmpeg error:', stderr);
-          reject(err);
-        } else {
-          resolve();
-        }
+        if (err) { console.error('FFmpeg error:', stderr); reject(err); }
+        else resolve();
       });
     });
 
@@ -159,14 +208,12 @@ app.post('/html-to-video', async (req, res) => {
     res.status(500).json({ error: error.message });
   } finally {
     if (browser) await browser.close();
-    // Cleanup temp files
     try { fs.rmSync(tmpDir, { recursive: true }); } catch (e) {}
   }
 });
 
 // ─────────────────────────────────────────────
 // INJECT ANIMATIONS into HTML
-// Adds CSS keyframe animations to all elements
 // ─────────────────────────────────────────────
 function injectAnimations(html) {
   const animationCSS = `
@@ -187,39 +234,23 @@ function injectAnimations(html) {
         0%   { opacity: 0; transform: translateX(-30px); }
         100% { opacity: 1; transform: translateX(0); }
       }
-
-      /* Title — big bold pop up */
       .title, [style*="font-weight:700"], [style*="font-weight:900"] {
         animation: fadeUp 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
         animation-delay: 0.2s;
       }
-
-      /* Category / labels — fade in */
       .cat, .kicker, [style*="letter-spacing:8px"], [style*="letter-spacing:6px"] {
         animation: fadeIn 0.7s ease both;
         animation-delay: 0.05s;
       }
-
-      /* Meta blocks (When / City / Where) */
       .meta-block > div:nth-child(1) { animation: fadeUp 0.7s ease both; animation-delay: 0.5s; }
       .meta-block > div:nth-child(2) { animation: fadeUp 0.7s ease both; animation-delay: 0.7s; }
       .meta-block > div:nth-child(3) { animation: fadeUp 0.7s ease both; animation-delay: 0.9s; }
-
-      /* Logo */
       .logo, img { animation: fadeIn 0.6s ease both; animation-delay: 0s; }
-
-      /* Line */
       .line { animation: scaleIn 0.5s ease both; animation-delay: 0.3s; transform-origin: left; }
-
-      /* SVG blob */
       svg { animation: fadeIn 1.2s ease both; animation-delay: 0s; }
-
-      /* Appreciart footer */
       .appreciart { animation: fadeIn 0.6s ease both; animation-delay: 1.1s; }
     </style>
   `;
-
-  // Insert before </head>
   return html.replace('</head>', animationCSS + '</head>');
 }
 
@@ -227,11 +258,11 @@ function injectAnimations(html) {
 // HEALTH CHECK
 // ─────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', endpoints: ['/html-to-image', '/html-to-video'] });
+  res.json({ status: 'ok', endpoints: ['/html-to-image', '/html-to-video', '/slideshow'] });
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Endpoints: POST /html-to-image | POST /html-to-video`);
+  console.log(`Endpoints: POST /html-to-image | POST /html-to-video | POST /slideshow`);
 });
