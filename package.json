@@ -1,10 +1,18 @@
 {
-  "name": "ffmpeg-slideshow",
-  "version": "1.0.0",
+  "name": "appreciart-server",
+  "version": "2.0.0",
+  "description": "HTML to Image + Video server for Appreciart Instagram automation",
   "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
   "dependencies": {
+    "cloudinary": "^1.41.0",
     "express": "^4.18.2",
-    "puppeteer": "^21.0.0",
-    "cloudinary": "^1.41.0"
+    "puppeteer": "^21.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
