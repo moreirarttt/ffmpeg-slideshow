@@ -64,6 +64,27 @@ app.post('/html-to-image', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
+// HELPER: Download a URL to a file (no curl needed)
+// ─────────────────────────────────────────────
+function downloadFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    const protocol = url.startsWith('https') ? require('https') : require('http');
+    protocol.get(url, (response) => {
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        file.close();
+        return downloadFile(response.headers.location, dest).then(resolve).catch(reject);
+      }
+      response.pipe(file);
+      file.on('finish', () => file.close(resolve));
+    }).on('error', (err) => {
+      fs.unlink(dest, () => {});
+      reject(err);
+    });
+  });
+}
+
+// ─────────────────────────────────────────────
 // SLIDESHOW: Image URL → MP4 with random music
 // ─────────────────────────────────────────────
 app.post('/slideshow', async (req, res) => {
@@ -80,13 +101,13 @@ app.post('/slideshow', async (req, res) => {
     // Download the image
     const imageUrl = slides[0];
     const imagePath = path.join(tmpDir, 'slide.png');
-    execSync(`curl -L -o "${imagePath}" "${imageUrl}"`, { timeout: 30000 });
+    await downloadFile(imageUrl, imagePath);
 
     // Pick music: use provided audioUrl or pick random from music/ folder
     let musicPath = null;
     if (audioUrl) {
       musicPath = path.join(tmpDir, 'audio.mp3');
-      execSync(`curl -L -o "${musicPath}" "${audioUrl}"`, { timeout: 30000 });
+      await downloadFile(audioUrl, musicPath);
     } else {
       musicPath = getRandomMusic();
     }
