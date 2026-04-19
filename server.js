@@ -58,7 +58,13 @@ app.post('/html-to-video', async (req, res) => {
   let browser;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-'));
   const outputPath = path.join(tmpDir, 'reel.mp4');
-  const musicPath = path.join(__dirname, 'music', 'ambient.mp3');
+  
+  // Randomly select one of 3 music files
+  const musicFiles = ['music1.mp3', 'music2.mp3', 'music3.mp3'];
+  const randomMusic = musicFiles[Math.floor(Math.random() * musicFiles.length)];
+  const musicPath = path.join(__dirname, 'music', randomMusic);
+  
+  console.log(`Selected music: ${randomMusic}`);
 
   try {
     const {
