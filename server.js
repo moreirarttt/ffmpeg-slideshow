@@ -123,12 +123,12 @@ app.post('/slideshow', async (req, res) => {
       musicPath = getRandomMusic();
     }
 
-    // Build FFmpeg command
+    // Build FFmpeg command (ultrafast + 1 thread = low memory)
     let ffmpegCmd;
     if (musicPath) {
-      ffmpegCmd = `ffmpeg -loop 1 -i "${imagePath}" -i "${musicPath}" -c:v libx264 -t ${duration} -pix_fmt yuv420p -vf "scale=1080:1350" -c:a aac -b:a 128k -shortest -movflags +faststart -y "${outputPath}"`;
+      ffmpegCmd = `ffmpeg -loop 1 -i "${imagePath}" -i "${musicPath}" -c:v libx264 -preset ultrafast -threads 1 -t ${duration} -pix_fmt yuv420p -vf "scale=1080:1350" -c:a aac -b:a 128k -shortest -movflags +faststart -y "${outputPath}"`;
     } else {
-      ffmpegCmd = `ffmpeg -loop 1 -i "${imagePath}" -c:v libx264 -t ${duration} -pix_fmt yuv420p -vf "scale=1080:1350" -movflags +faststart -y "${outputPath}"`;
+      ffmpegCmd = `ffmpeg -loop 1 -i "${imagePath}" -c:v libx264 -preset ultrafast -threads 1 -t ${duration} -pix_fmt yuv420p -vf "scale=1080:1350" -movflags +faststart -y "${outputPath}"`;
     }
 
     execSync(ffmpegCmd, { timeout: 120000 });
