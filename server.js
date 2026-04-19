@@ -1,5 +1,4 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
 const cloudinary = require('cloudinary').v2;
 const { execSync, exec } = require('child_process');
 const fs = require('fs');
@@ -17,6 +16,17 @@ cloudinary.config({
 });
 
 // ─────────────────────────────────────────────
+// LAZY LOAD Puppeteer — só carrega quando usado
+// ─────────────────────────────────────────────
+let puppeteer = null;
+function getPuppeteer() {
+  if (!puppeteer) {
+    puppeteer = require('puppeteer');
+  }
+  return puppeteer;
+}
+
+// ─────────────────────────────────────────────
 // HELPER: Pick a random music file from music/
 // ─────────────────────────────────────────────
 function getRandomMusic() {
@@ -30,7 +40,28 @@ function getRandomMusic() {
 }
 
 // ─────────────────────────────────────────────
-// EXISTING: HTML → Image (for carousel slides)
+// HELPER: Download a URL to a file
+// ─────────────────────────────────────────────
+function downloadFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    const protocol = url.startsWith('https') ? require('https') : require('http');
+    protocol.get(url, (response) => {
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        file.close();
+        return downloadFile(response.headers.location, dest).then(resolve).catch(reject);
+      }
+      response.pipe(file);
+      file.on('finish', () => file.close(resolve));
+    }).on('error', (err) => {
+      fs.unlink(dest, () => {});
+      reject(err);
+    });
+  });
+}
+
+// ─────────────────────────────────────────────
+// HTML → Image (Puppeteer — lazy loaded)
 // ─────────────────────────────────────────────
 app.post('/html-to-image', async (req, res) => {
   let browser;
@@ -38,7 +69,8 @@ app.post('/html-to-image', async (req, res) => {
     const { html, width = 1080, height = 1350 } = req.body;
     if (!html) return res.status(400).json({ error: 'HTML is required' });
 
-    browser = await puppeteer.launch({
+    const pptr = getPuppeteer();
+    browser = await pptr.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     });
@@ -64,28 +96,7 @@ app.post('/html-to-image', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// HELPER: Download a URL to a file (no curl needed)
-// ─────────────────────────────────────────────
-function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
-    const protocol = url.startsWith('https') ? require('https') : require('http');
-    protocol.get(url, (response) => {
-      if (response.statusCode === 301 || response.statusCode === 302) {
-        file.close();
-        return downloadFile(response.headers.location, dest).then(resolve).catch(reject);
-      }
-      response.pipe(file);
-      file.on('finish', () => file.close(resolve));
-    }).on('error', (err) => {
-      fs.unlink(dest, () => {});
-      reject(err);
-    });
-  });
-}
-
-// ─────────────────────────────────────────────
-// SLIDESHOW: Image URL → MP4 with random music
+// SLIDESHOW: Image URL → MP4 (só FFmpeg, sem Puppeteer)
 // ─────────────────────────────────────────────
 app.post('/slideshow', async (req, res) => {
   const { slides, duration = 15, audioUrl } = req.body;
@@ -139,8 +150,7 @@ app.post('/slideshow', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// NEW: HTML → Animated Video (for Reels)
-// Records frames → FFmpeg → .mp4
+// HTML → Animated Video (Puppeteer — lazy loaded)
 // ─────────────────────────────────────────────
 app.post('/html-to-video', async (req, res) => {
   let browser;
@@ -160,8 +170,9 @@ app.post('/html-to-video', async (req, res) => {
 
     if (!html) return res.status(400).json({ error: 'HTML is required' });
 
+    const pptr = getPuppeteer();
     console.log('Launching Puppeteer for video...');
-    browser = await puppeteer.launch({
+    browser = await pptr.launch({
       headless: true,
       args: [
         '--no-sandbox',
