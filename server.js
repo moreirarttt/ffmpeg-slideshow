@@ -30,7 +30,7 @@ function getPuppeteer() {
 // HELPER: Pick a random music file from music/
 // ─────────────────────────────────────────────
 function getRandomMusic() {
-  const musicDir = path.join(__dirname, 'music');
+  const musicDir = path.join(__dirname);
   if (!fs.existsSync(musicDir)) return null;
   const files = fs.readdirSync(musicDir).filter(f => f.endsWith('.mp3'));
   if (!files.length) return null;
