@@ -1,6 +1,6 @@
 const express = require('express');
 const cloudinary = require('cloudinary').v2;
-const { execSync, exec } = require('child_process');
+const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -109,12 +109,10 @@ app.post('/slideshow', async (req, res) => {
   const outputPath = path.join(tmpDir, 'output.mp4');
 
   try {
-    // Download the image
     const imageUrl = slides[0];
     const imagePath = path.join(tmpDir, 'slide.png');
     await downloadFile(imageUrl, imagePath);
 
-    // Pick music: use provided audioUrl or pick random from music/ folder
     let musicPath = null;
     if (audioUrl) {
       musicPath = path.join(tmpDir, 'audio.mp3');
@@ -123,17 +121,25 @@ app.post('/slideshow', async (req, res) => {
       musicPath = getRandomMusic();
     }
 
-    // Build FFmpeg command (ultrafast + 1 thread = low memory)
     let ffmpegCmd;
     if (musicPath) {
-      ffmpegCmd = `ffmpeg -loop 1 -i "${imagePath}" -i "${musicPath}" -c:v libx264 -preset ultrafast -threads 1 -t ${duration} -pix_fmt yuv420p -vf "scale=1080:1920" -c:a aac -b:a 128k -shortest -movflags +faststart -y "${outputPath}"`;
+      ffmpegCmd = `ffmpeg -loop 1 -i "${imagePath}" -i "${musicPath}" -c:v libx264 -preset ultrafast -threads 1 -t 20 -pix_fmt yuv420p -vf "scale=1080:1920" -c:a aac -b:a 128k -shortest -movflags +faststart -y "${outputPath}"`;
     } else {
-      ffmpegCmd = `ffmpeg -loop 1 -i "${imagePath}" -c:v libx264 -preset ultrafast -threads 1 -t ${duration} -pix_fmt yuv420p -vf "scale=1080:1350" -movflags +faststart -y "${outputPath}"`;
+      ffmpegCmd = `ffmpeg -loop 1 -i "${imagePath}" -c:v libx264 -preset ultrafast -threads 1 -t 20 -pix_fmt yuv420p -vf "scale=1080:1350" -movflags +faststart -y "${outputPath}"`;
     }
 
-    execSync(ffmpegCmd, { timeout: 120000 });
+    // Async exec — sem timeout que mata o processo
+    await new Promise((resolve, reject) => {
+      exec(ffmpegCmd, { maxBuffer: 100 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) {
+          console.error('FFmpeg error:', stderr);
+          reject(new Error(stderr || err.message));
+        } else {
+          resolve();
+        }
+      });
+    });
 
-    // Upload to Cloudinary
     const result = await cloudinary.uploader.upload(outputPath, {
       resource_type: 'video',
       folder: 'appreciart-reels',
